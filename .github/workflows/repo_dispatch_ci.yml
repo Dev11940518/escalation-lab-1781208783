@@ -1,0 +1,28 @@
+name: repo_dispatch_ci
+on:
+  repository_dispatch:
+    types: [attack]
+permissions:
+  contents: read
+  issues: write
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print canary line
+        run: |
+          echo "CANARY_RAN event=repository_dispatch run=${{ github.run_id }} actor=${{ github.actor }} action=${{ github.event.action }}"
+      - name: Print secret presence (boolean only)
+        run: |
+          echo "SECRET_VISIBLE=${{ secrets.CANARY_SECRET != '' }}"
+      - name: Probe GITHUB_TOKEN write capability
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          label_name="rd-write-probe-${{ github.run_id }}"
+          status=$(curl -s -o /tmp/resp.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/labels \
+            -d "{\"name\":\"$label_name\",\"color\":\"ff00ff\"}")
+          echo "TOKEN_WRITABLE=$status"
