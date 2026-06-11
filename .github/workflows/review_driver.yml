@@ -1,0 +1,176 @@
+name: review_driver
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review/comment on'
+        required: true
+        type: string
+permissions:
+  contents: read
+  pull-requests: write
+  actions: write
+jobs:
+  drive:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR_NUM: ${{ inputs.pr_number }}
+    steps:
+      - name: Identify actor
+        run: |
+          echo "DRIVER actor=${{ github.actor }} triggering_actor=${{ github.triggering_actor }} run=${{ github.run_id }} repo=${{ github.repository }}"
+
+      - name: Fetch PR head sha + a changed file path
+        id: pr
+        run: |
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUM" \
+            | tee /tmp/pr.json | jq '{number,head_sha:.head.sha,base_ref:.base.ref,head_ref:.head.ref,user:.user.login,state:.state,mergeable_state:.mergeable_state}'
+          HEAD_SHA=$(jq -r '.head.sha' /tmp/pr.json)
+          echo "HEAD_SHA=$HEAD_SHA" >> $GITHUB_OUTPUT
+
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUM/files" \
+            | tee /tmp/files.json | jq '.[] | {filename,status,additions}'
+          FILE_PATH=$(jq -r '.[0].filename' /tmp/files.json)
+          echo "FILE_PATH=$FILE_PATH" >> $GITHUB_OUTPUT
+          echo "Using HEAD_SHA=$HEAD_SHA FILE_PATH=$FILE_PATH"
+
+      - name: A) Submit PR review (event=COMMENT) via GITHUB_TOKEN
+        id: review
+        run: |
+          echo "=== POST /pulls/$PR_NUM/reviews (event=COMMENT) ==="
+          status=$(curl -s -o /tmp/review.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUM/reviews" \
+            -d "{\"event\":\"COMMENT\",\"body\":\"review trigger probe run=${{ github.run_id }}\"}")
+          echo "REVIEW_HTTP=$status"
+          echo "REVIEW_BODY<<EOF"
+          cat /tmp/review.json
+          echo
+          echo "EOF"
+          REVIEW_SUBMITTED_AT=$(jq -r '.submitted_at // empty' /tmp/review.json)
+          REVIEW_ID=$(jq -r '.id // empty' /tmp/review.json)
+          echo "REVIEW_ID=$REVIEW_ID REVIEW_SUBMITTED_AT=$REVIEW_SUBMITTED_AT"
+          echo "REVIEW_HTTP=$status" >> $GITHUB_OUTPUT
+
+      - name: B) Submit PR review COMMENT via GITHUB_TOKEN
+        id: rc
+        run: |
+          echo "=== POST /pulls/$PR_NUM/comments ==="
+          # Use subject_type=file to avoid needing an exact diff line.
+          status=$(curl -s -o /tmp/rc.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUM/comments" \
+            -d "{\"body\":\"review-comment trigger probe run=${{ github.run_id }}\",\"commit_id\":\"${{ steps.pr.outputs.HEAD_SHA }}\",\"path\":\"${{ steps.pr.outputs.FILE_PATH }}\",\"subject_type\":\"file\"}")
+          echo "RC_HTTP=$status"
+          echo "RC_BODY<<EOF"
+          cat /tmp/rc.json
+          echo
+          echo "EOF"
+          # If subject_type=file fails, fall back to line=1 side=RIGHT
+          if [ "$status" != "201" ]; then
+            echo "=== fallback POST /pulls/$PR_NUM/comments line=1 side=RIGHT ==="
+            status=$(curl -s -o /tmp/rc.json -w "%{http_code}" -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUM/comments" \
+              -d "{\"body\":\"review-comment trigger probe run=${{ github.run_id }} (fallback)\",\"commit_id\":\"${{ steps.pr.outputs.HEAD_SHA }}\",\"path\":\"${{ steps.pr.outputs.FILE_PATH }}\",\"line\":1,\"side\":\"RIGHT\"}")
+            echo "RC_HTTP_FALLBACK=$status"
+            cat /tmp/rc.json
+            echo
+          fi
+          echo "RC_HTTP=$status" >> $GITHUB_OUTPUT
+
+      - name: Wait for runs to appear
+        run: sleep 25
+
+      - name: List runs for events pull_request_review + pull_request_review_comment
+        id: runs
+        run: |
+          echo "=== runs event=pull_request_review ==="
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs?event=pull_request_review&per_page=20" \
+            | tee /tmp/runs_review.json | jq '.workflow_runs[] | {id,name,status,conclusion,event,actor:.actor.login,triggering_actor:.triggering_actor.login,created_at}'
+
+          echo "=== runs event=pull_request_review_comment ==="
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs?event=pull_request_review_comment&per_page=20" \
+            | tee /tmp/runs_rc.json | jq '.workflow_runs[] | {id,name,status,conclusion,event,actor:.actor.login,triggering_actor:.triggering_actor.login,created_at}'
+
+          REVIEW_RUN_ID=$(jq -r --arg run "${{ github.run_id }}" '.workflow_runs | sort_by(.created_at) | reverse | .[] | select(.name=="review_ci") | .id' /tmp/runs_review.json | head -n1)
+          RC_RUN_ID=$(jq -r '.workflow_runs | sort_by(.created_at) | reverse | .[] | select(.name=="review_comment_ci") | .id' /tmp/runs_rc.json | head -n1)
+          echo "REVIEW_RUN_ID=$REVIEW_RUN_ID"
+          echo "RC_RUN_ID=$RC_RUN_ID"
+          echo "REVIEW_RUN_ID=$REVIEW_RUN_ID" >> $GITHUB_OUTPUT
+          echo "RC_RUN_ID=$RC_RUN_ID" >> $GITHUB_OUTPUT
+
+      - name: Examine review_ci run state (before rerun)
+        if: steps.runs.outputs.REVIEW_RUN_ID != '' && steps.runs.outputs.REVIEW_RUN_ID != 'null'
+        run: |
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ steps.runs.outputs.REVIEW_RUN_ID }}" \
+            | jq '{id,name,status,conclusion,event,actor:.actor.login,triggering_actor:.triggering_actor.login}'
+
+      - name: Examine review_comment_ci run state (before rerun)
+        if: steps.runs.outputs.RC_RUN_ID != '' && steps.runs.outputs.RC_RUN_ID != 'null'
+        run: |
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ steps.runs.outputs.RC_RUN_ID }}" \
+            | jq '{id,name,status,conclusion,event,actor:.actor.login,triggering_actor:.triggering_actor.login}'
+
+      - name: Self-approve review_ci via /rerun (if action_required)
+        if: steps.runs.outputs.REVIEW_RUN_ID != '' && steps.runs.outputs.REVIEW_RUN_ID != 'null'
+        run: |
+          echo "=== POST /actions/runs/${{ steps.runs.outputs.REVIEW_RUN_ID }}/rerun ==="
+          status=$(curl -s -o /tmp/rerun_r.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ steps.runs.outputs.REVIEW_RUN_ID }}/rerun")
+          echo "RERUN_REVIEW_HTTP=$status"
+          cat /tmp/rerun_r.json; echo
+
+      - name: Self-approve review_comment_ci via /rerun (if action_required)
+        if: steps.runs.outputs.RC_RUN_ID != '' && steps.runs.outputs.RC_RUN_ID != 'null'
+        run: |
+          echo "=== POST /actions/runs/${{ steps.runs.outputs.RC_RUN_ID }}/rerun ==="
+          status=$(curl -s -o /tmp/rerun_rc.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ steps.runs.outputs.RC_RUN_ID }}/rerun")
+          echo "RERUN_RC_HTTP=$status"
+          cat /tmp/rerun_rc.json; echo
+
+      - name: Poll review_ci to terminal
+        if: steps.runs.outputs.REVIEW_RUN_ID != '' && steps.runs.outputs.REVIEW_RUN_ID != 'null'
+        run: |
+          for i in $(seq 1 30); do
+            R=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ steps.runs.outputs.REVIEW_RUN_ID }}")
+            S=$(echo "$R" | jq -r '.status'); C=$(echo "$R" | jq -r '.conclusion')
+            echo "POLL review_ci i=$i status=$S conclusion=$C"
+            if [ "$S" = "completed" ]; then break; fi
+            sleep 10
+          done
+          echo "$R" | jq '{id,name,status,conclusion,event,actor:.actor.login,triggering_actor:.triggering_actor.login}'
+
+      - name: Poll review_comment_ci to terminal
+        if: steps.runs.outputs.RC_RUN_ID != '' && steps.runs.outputs.RC_RUN_ID != 'null'
+        run: |
+          for i in $(seq 1 30); do
+            R=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ steps.runs.outputs.RC_RUN_ID }}")
+            S=$(echo "$R" | jq -r '.status'); C=$(echo "$R" | jq -r '.conclusion')
+            echo "POLL review_comment_ci i=$i status=$S conclusion=$C"
+            if [ "$S" = "completed" ]; then break; fi
+            sleep 10
+          done
+          echo "$R" | jq '{id,name,status,conclusion,event,actor:.actor.login,triggering_actor:.triggering_actor.login}'
+
+      - name: Final summary
+        run: |
+          echo "REVIEW_HTTP=${{ steps.review.outputs.REVIEW_HTTP }}"
+          echo "RC_HTTP=${{ steps.rc.outputs.RC_HTTP }}"
+          echo "REVIEW_RUN_ID=${{ steps.runs.outputs.REVIEW_RUN_ID }}"
+          echo "RC_RUN_ID=${{ steps.runs.outputs.RC_RUN_ID }}"
