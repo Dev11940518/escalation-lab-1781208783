@@ -79,7 +79,7 @@ jobs:
           echo "CI_RUN_ID=$CI_RUN_ID" >> $GITHUB_OUTPUT
           echo "CI_STATUS=$CI_STATUS" >> $GITHUB_OUTPUT
 
-      - name: Attempt self-approve via GITHUB_TOKEN (Experiment A)
+      - name: Attempt self-approve via GITHUB_TOKEN (Experiment A) - /approve endpoint
         if: steps.runs.outputs.CI_RUN_ID != '' && steps.runs.outputs.CI_RUN_ID != 'null'
         run: |
           echo "=== POST /actions/runs/${{ steps.runs.outputs.CI_RUN_ID }}/approve ==="
@@ -90,6 +90,48 @@ jobs:
           echo "APPROVE_HTTP=$status"
           echo "APPROVE_BODY<<EOF"
           cat /tmp/approve.json
+          echo "EOF"
+
+      - name: Attempt self-approve via GITHUB_TOKEN (Experiment A) - /rerun endpoint
+        if: steps.runs.outputs.CI_RUN_ID != '' && steps.runs.outputs.CI_RUN_ID != 'null'
+        run: |
+          echo "=== POST /actions/runs/${{ steps.runs.outputs.CI_RUN_ID }}/rerun ==="
+          status=$(curl -s -o /tmp/rerun.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ steps.runs.outputs.CI_RUN_ID }}/rerun")
+          echo "RERUN_HTTP=$status"
+          echo "RERUN_BODY<<EOF"
+          cat /tmp/rerun.json
+          echo "EOF"
+
+      - name: Attempt /rerun-failed-jobs (alt) via GITHUB_TOKEN
+        if: steps.runs.outputs.CI_RUN_ID != '' && steps.runs.outputs.CI_RUN_ID != 'null'
+        run: |
+          echo "=== POST /actions/runs/${{ steps.runs.outputs.CI_RUN_ID }}/rerun-failed-jobs ==="
+          status=$(curl -s -o /tmp/rerunf.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ steps.runs.outputs.CI_RUN_ID }}/rerun-failed-jobs")
+          echo "RERUNF_HTTP=$status"
+          echo "RERUNF_BODY<<EOF"
+          cat /tmp/rerunf.json
+          echo "EOF"
+
+      - name: Attempt check-suite rerequest via GITHUB_TOKEN
+        if: steps.runs.outputs.CI_RUN_ID != '' && steps.runs.outputs.CI_RUN_ID != 'null'
+        run: |
+          CS_ID=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ steps.runs.outputs.CI_RUN_ID }}" \
+            | jq -r .check_suite_id)
+          echo "CHECK_SUITE_ID=$CS_ID"
+          status=$(curl -s -o /tmp/cs.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/check-suites/$CS_ID/rerequest")
+          echo "CHECK_SUITE_RERUN_HTTP=$status"
+          echo "CHECK_SUITE_RERUN_BODY<<EOF"
+          cat /tmp/cs.json
           echo "EOF"
 
       - name: Poll ci.yml run to terminal
