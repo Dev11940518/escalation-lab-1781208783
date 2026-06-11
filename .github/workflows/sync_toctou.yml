@@ -1,0 +1,41 @@
+name: sync_toctou
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: branch to push to (existing bot PR head)
+        required: true
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+jobs:
+  push_new_commit:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Configure git
+        run: |
+          git config --global user.email "bot@example.test"
+          git config --global user.name "github-actions[bot]"
+
+      - name: Clone and push fresh commit to existing branch
+        run: |
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" work
+          cd work
+          git fetch origin ${{ inputs.branch }}
+          git checkout -B ${{ inputs.branch }} origin/${{ inputs.branch }}
+          echo "post-approval commit at $(date)" >> MARKER.txt
+          git add MARKER.txt
+          git commit -m "post-approval commit (TOCTOU)"
+          git push origin ${{ inputs.branch }}
+          NEW_SHA=$(git rev-parse HEAD)
+          echo "NEW_SHA=$NEW_SHA"
+
+      - name: Wait + list runs on new head sha
+        run: |
+          sleep 25
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs?event=pull_request&per_page=5" \
+            | jq '.workflow_runs[] | {id,name,status,conclusion,event,head_sha,run_attempt,head_branch,actor:.actor.login,triggering_actor:.triggering_actor.login}'
