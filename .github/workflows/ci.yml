@@ -1,0 +1,30 @@
+name: ci
+on:
+  pull_request:
+permissions:
+  contents: read
+  issues: write
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print canary line
+        run: |
+          echo "CANARY_RAN run=${{ github.run_id }} actor=${{ github.actor }} event=${{ github.event_name }} head=${{ github.event.pull_request.head.sha }} base_ref=${{ github.event.pull_request.base.ref }} head_ref=${{ github.event.pull_request.head.ref }}"
+      - name: Print secret presence (boolean only)
+        run: |
+          echo "SECRET_VISIBLE=${{ secrets.CANARY_SECRET != '' }}"
+      - name: Probe GITHUB_TOKEN write capability
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Create a label using GITHUB_TOKEN as a write probe.
+          label_name="ci-write-probe-${{ github.run_id }}"
+          status=$(curl -s -o /tmp/resp.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/labels \
+            -d "{\"name\":\"$label_name\",\"color\":\"00ff00\"}")
+          echo "TOKEN_WRITABLE=$status"
+          head -c 200 /tmp/resp.json || true
+          echo

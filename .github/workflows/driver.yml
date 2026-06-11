@@ -1,0 +1,113 @@
+name: driver
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+jobs:
+  drive:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Identify actor
+        run: |
+          echo "DRIVER actor=${{ github.actor }} triggering_actor=${{ github.triggering_actor }} run=${{ github.run_id }} repo=${{ github.repository }}"
+          curl -s -H "Authorization: Bearer $GH_TOKEN" \
+               -H "Accept: application/vnd.github+json" \
+               "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            | jq '{actor: .actor.login, triggering_actor: .triggering_actor.login}'
+
+      - name: Configure git
+        run: |
+          git config --global user.email "bot@example.test"
+          git config --global user.name "github-actions[bot]"
+
+      - name: Clone base
+        run: |
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" work
+          cd work && git checkout -B main origin/main
+
+      - name: Create feature branch with harmless change
+        id: branch
+        run: |
+          cd work
+          BR="feat/a-${{ github.run_id }}"
+          echo "BRANCH=$BR" >> $GITHUB_OUTPUT
+          git checkout -b "$BR"
+          echo "marker for run ${{ github.run_id }}" > MARKER.txt
+          git add MARKER.txt
+          git commit -m "bot pr marker"
+          git push origin "$BR"
+
+      - name: Create PR using GITHUB_TOKEN
+        id: pr
+        run: |
+          cd work
+          # Create PR via API (gh CLI would also use the same token)
+          PR_RESP=$(curl -sS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls" \
+            -d "{\"title\":\"bot pr ${{ github.run_id }}\",\"head\":\"${{ steps.branch.outputs.BRANCH }}\",\"base\":\"main\",\"body\":\"automated\"}")
+          echo "PR_CREATE_BODY<<EOF"
+          echo "$PR_RESP"
+          echo "EOF"
+          PR_NUM=$(echo "$PR_RESP" | jq -r '.number')
+          PR_HEAD_SHA=$(echo "$PR_RESP" | jq -r '.head.sha')
+          PR_USER=$(echo "$PR_RESP" | jq -r '.user.login')
+          echo "PR_NUM=$PR_NUM" >> $GITHUB_OUTPUT
+          echo "PR_HEAD_SHA=$PR_HEAD_SHA" >> $GITHUB_OUTPUT
+          echo "PR_USER=$PR_USER" >> $GITHUB_OUTPUT
+          echo "BOTPR_CREATED pr=$PR_NUM head_sha=$PR_HEAD_SHA user=$PR_USER"
+
+      - name: Wait then list workflow runs for PR head
+        id: runs
+        run: |
+          sleep 25
+          echo "=== runs by head_sha=${{ steps.pr.outputs.PR_HEAD_SHA }} ==="
+          curl -sS \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs?head_sha=${{ steps.pr.outputs.PR_HEAD_SHA }}&event=pull_request" \
+            | tee /tmp/runs.json | jq '.workflow_runs[] | {id,name,status,conclusion,event,actor:.actor.login,triggering_actor:.triggering_actor.login}'
+          CI_RUN_ID=$(jq -r '.workflow_runs[] | select(.name=="ci") | .id' /tmp/runs.json | head -n1)
+          CI_STATUS=$(jq -r --arg id "$CI_RUN_ID" '.workflow_runs[] | select((.id|tostring)==$id) | .status' /tmp/runs.json)
+          echo "Q1_CI_RUN_ID=$CI_RUN_ID"
+          echo "Q1_CI_STATUS=$CI_STATUS"
+          echo "CI_RUN_ID=$CI_RUN_ID" >> $GITHUB_OUTPUT
+          echo "CI_STATUS=$CI_STATUS" >> $GITHUB_OUTPUT
+
+      - name: Attempt self-approve via GITHUB_TOKEN (Experiment A)
+        if: steps.runs.outputs.CI_RUN_ID != '' && steps.runs.outputs.CI_RUN_ID != 'null'
+        run: |
+          echo "=== POST /actions/runs/${{ steps.runs.outputs.CI_RUN_ID }}/approve ==="
+          status=$(curl -s -o /tmp/approve.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ steps.runs.outputs.CI_RUN_ID }}/approve")
+          echo "APPROVE_HTTP=$status"
+          echo "APPROVE_BODY<<EOF"
+          cat /tmp/approve.json
+          echo "EOF"
+
+      - name: Poll ci.yml run to terminal
+        if: steps.runs.outputs.CI_RUN_ID != '' && steps.runs.outputs.CI_RUN_ID != 'null'
+        run: |
+          for i in $(seq 1 30); do
+            R=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ steps.runs.outputs.CI_RUN_ID }}")
+            S=$(echo "$R" | jq -r '.status')
+            C=$(echo "$R" | jq -r '.conclusion')
+            echo "POLL i=$i status=$S conclusion=$C"
+            if [ "$S" = "completed" ] || [ "$S" = "null" ]; then break; fi
+            sleep 10
+          done
+
+      - name: Final ci run summary
+        if: steps.runs.outputs.CI_RUN_ID != '' && steps.runs.outputs.CI_RUN_ID != 'null'
+        run: |
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ steps.runs.outputs.CI_RUN_ID }}" \
+            | jq '{id,name,status,conclusion,event,actor:.actor.login,triggering_actor:.triggering_actor.login}'
