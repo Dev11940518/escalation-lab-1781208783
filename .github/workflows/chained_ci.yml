@@ -1,0 +1,17 @@
+name: chained_ci
+on:
+  workflow_run:
+    workflows: ['ci']
+    types: [requested, completed]
+permissions:
+  contents: read
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print canary line
+        run: |
+          echo "WORKFLOWRUN_FIRED downstream_run=${{ github.run_id }} actor=${{ github.actor }} upstream_workflow=${{ github.event.workflow_run.name }} upstream_run=${{ github.event.workflow_run.id }} upstream_event=${{ github.event.workflow_run.event }} upstream_conclusion=${{ github.event.workflow_run.conclusion }} upstream_actor=${{ github.event.workflow_run.actor.login }} upstream_triggering_actor=${{ github.event.workflow_run.triggering_actor.login }} action=${{ github.event.action }}"
+      - name: Print secret presence (boolean only)
+        run: |
+          echo "SECRET_VISIBLE=${{ secrets.CANARY_SECRET != '' }}"
