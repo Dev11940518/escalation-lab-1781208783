@@ -1,0 +1,18 @@
+name: chained_rd
+on:
+  workflow_run:
+    workflows: ['repo_dispatch_ci']
+    types: [completed]
+permissions:
+  contents: read
+  issues: write
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print canary line
+        run: |
+          echo "CANARY_RAN event=workflow_run downstream_run=${{ github.run_id }} actor=${{ github.actor }} upstream_workflow=${{ github.event.workflow_run.name }} upstream_run=${{ github.event.workflow_run.id }} upstream_event=${{ github.event.workflow_run.event }} upstream_actor=${{ github.event.workflow_run.actor.login }} upstream_triggering_actor=${{ github.event.workflow_run.triggering_actor.login }}"
+      - name: Print secret presence
+        run: |
+          echo "SECRET_VISIBLE=${{ secrets.CANARY_SECRET != '' }}"
