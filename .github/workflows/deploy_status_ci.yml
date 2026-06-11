@@ -1,0 +1,16 @@
+name: deploy_status_ci
+on:
+  deployment_status:
+permissions:
+  contents: read
+  issues: write
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print canary line
+        run: |
+          echo "CANARY_RAN event=deployment_status run=${{ github.run_id }} actor=${{ github.actor }} state=${{ github.event.deployment_status.state }} deployment_id=${{ github.event.deployment.id }} env=${{ github.event.deployment.environment }}"
+      - name: Print secret presence (boolean only)
+        run: |
+          echo "SECRET_VISIBLE=${{ secrets.CANARY_SECRET != '' }}"

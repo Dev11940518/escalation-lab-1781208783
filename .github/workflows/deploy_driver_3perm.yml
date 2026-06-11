@@ -1,0 +1,45 @@
+name: deploy_driver_3perm
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+jobs:
+  drive:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Identify actor
+        run: |
+          echo "DRIVER actor=${{ github.actor }} triggering_actor=${{ github.triggering_actor }} run=${{ github.run_id }} perms=3perm"
+
+      - name: Show effective job token permissions (workflow-declared)
+        run: |
+          echo "WORKFLOW_PERMS_DECLARED contents=write actions=write pull-requests=write deployments=NONE"
+
+      - name: Get main HEAD sha
+        id: sha
+        run: |
+          MAIN_SHA=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/git/ref/heads/main" | jq -r .object.sha)
+          echo "MAIN_SHA=$MAIN_SHA"
+          echo "MAIN_SHA=$MAIN_SHA" >> $GITHUB_OUTPUT
+
+      - name: Attempt POST /deployments with 3-perm token (expect permission error)
+        id: dep
+        run: |
+          BODY=$(jq -n --arg ref "${{ steps.sha.outputs.MAIN_SHA }}" '{ref:$ref, environment:"production", auto_merge:false, required_contexts:[], description:"bot deploy 3perm"}')
+          status=$(curl -s -o /tmp/dep.json -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/deployments" \
+            -d "$BODY")
+          echo "DEPLOY_HTTP_3PERM=$status"
+          echo "DEPLOY_BODY_HEAD<<EOF"
+          head -c 400 /tmp/dep.json
+          echo
+          echo "EOF"
+          DEP_ID=$(jq -r '.id // empty' /tmp/dep.json)
+          echo "DEPLOY_ID_3PERM=$DEP_ID"
